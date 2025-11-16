@@ -82,21 +82,28 @@ jobs:
           echo "🍏 已安装的 Xcode 版本:"
           ls -ld /Applications/Xcode_*.app
           
-          echo -e "\n--- 开始清理 ---"
+          echo -e "\n--- 开始清理 (使用简单循环方法) ---"
 
-          # 1. 识别要保留的 Xcode 版本
-          # xcode-select -p 返回路径如 /Applications/Xcode_15.4.app/Contents/Developer
-          # 我们用 sed 提取出 App 的路径
+          # 1. 明确检测出当前选中的 Xcode 路径
           SELECTED_XCODE_PATH=$(xcode-select -p | sed 's|/Contents/Developer||')
           if [[ -z "$SELECTED_XCODE_PATH" || ! -d "$SELECTED_XCODE_PATH" ]]; then
             echo "❌ 无法确定当前使用的 Xcode 路径，中止清理以策安全。"
             exit 1
           fi
-          echo "✅ 当前使用的 Xcode App: $(basename $SELECTED_XCODE_PATH)"
-          echo "ℹ️ 将保留此版本，并删除所有其他 Xcode 版本。"
+          echo "✅ 必须保留的 Xcode App 路径: ${SELECTED_XCODE_PATH}"
           
-          # 2. 精确删除其他 Xcode 版本
-          find /Applications -name "Xcode_*.app" -maxdepth 1 -not -path "$SELECTED_XCODE_PATH" -exec sudo rm -rf {} +
+          # 2. 遍历所有 Xcode，不是选中的路径就删除
+          for XCODE_APP_PATH in /Applications/Xcode_*.app; do
+            # 检查这是否是一个实际存在的目录
+            if [ -d "$XCODE_APP_PATH" ]; then
+              if [ "$XCODE_APP_PATH" == "$SELECTED_XCODE_PATH" ]; then
+                echo " L 保留: $(basename $XCODE_APP_PATH)"
+              else
+                echo " X 删除: $(basename $XCODE_APP_PATH)"
+                sudo rm -rf "$XCODE_APP_PATH"
+              fi
+            fi
+          done
           
           # 3. 清理 Xcode 编译缓存
           sudo rm -rf ~/Library/Developer/Xcode/DerivedData/* 2>/dev/null || true
@@ -115,7 +122,6 @@ jobs:
           echo "✅ 最终验证：确认保留的 Xcode 版本..."
           if [[ -d "$SELECTED_XCODE_PATH" ]]; then
             echo "----------------------------------------"
-            # 调用 xcodebuild 命令，权威地显示版本号和 Build 号
             xcodebuild -version
             echo "----------------------------------------"
             echo "✅ 验证成功！上述版本已被正确保留。"
@@ -130,16 +136,19 @@ jobs:
             https://github.com/${{ env.UPSTREAM_REPO }}.git vlckit
           cd vlckit
           echo "✅ 克隆完成，tag: ${{ needs.check-update.outputs.new_tag }}"
-      
+
       - name: Install Dependencies
         run: |
           echo "安装编译依赖..."
-          brew install automake libtool pkg-config ragel yasm nasm
+          # 使用 Homebrew 安装所有缺失的工具
+          # 这个列表包含了日志中提到的所有核心依赖
+          brew install autoconf automake libtool pkg-config cmake gettext bison yasm nasm ragel
           
-          # 检查 Python3
-          python3 --version
-          
-          echo "✅ 依赖安装完成"
+          # 解决版本不兼容问题：
+          # macOS 自带了旧版的 bison 和 gettext。
+          # 下面的命令会强制让 Homebrew 安装的新版本成为默认版本。
+          brew link --force bison
+          brew link --force gettext
       
       - name: Build iOS XCFramework
         run: |
