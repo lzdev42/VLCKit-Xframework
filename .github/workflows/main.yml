@@ -48,6 +48,28 @@ jobs:
             echo "has_new_tag=true" >> $GITHUB_OUTPUT
             echo "new_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
           fi
+      # ----------- 新增的诊断和修复步骤 -----------
+      - name: Select Xcode and Verify SDK Path
+        run: |
+          echo "当前 xcode-select 路径:"
+          xcode-select -p
+          
+          # 获取 setup-xcode action 设置的路径
+          # 通常是 /Applications/Xcode_*.app/Contents/Developer
+          XCODE_PATH=$(xcode-select -p)
+          
+          # 明确地使用 sudo 设置 xcode 路径，这可以解决权限和环境问题
+          sudo xcode-select -s "$XCODE_PATH"
+          echo "已使用 sudo 重新设置 xcode-select 路径为: $XCODE_PATH"
+          
+          echo "再次验证 xcode-select 路径:"
+          xcode-select -p
+          
+          echo "尝试定位 iOS SDK 路径:"
+          # 如果此命令成功，则说明环境已正确配置
+          xcrun --sdk iphoneos --show-sdk-path
+
+      # ... (后续步骤，如 Free up disk space, Clone VLCKit 等) ...
 
   build:
     name: Build Universal XCFramework
