@@ -72,36 +72,36 @@ jobs:
           xcodebuild -version
           df -h
           sysctl -n hw.ncpu
-      # 这个步骤必须放在这个 macos-latest 的 job 中
-      - name: Select Xcode and Verify SDK Path
-        run: |
-          echo "当前 xcode-select 路径:"
-          xcode-select -p
+      # # 这个步骤必须放在这个 macos-latest 的 job 中
+      # - name: Select Xcode and Verify SDK Path
+      #   run: |
+      #     echo "当前 xcode-select 路径:"
+      #     xcode-select -p
           
-          XCODE_PATH=$(xcode-select -p)
+      #     XCODE_PATH=$(xcode-select -p)
           
-          sudo xcode-select -s "$XCODE_PATH"
-          echo "已使用 sudo 重新设置 xcode-select 路径为: $XCODE_PATH"
+      #     sudo xcode-select -s "$XCODE_PATH"
+      #     echo "已使用 sudo 重新设置 xcode-select 路径为: $XCODE_PATH"
           
-          echo "再次验证 xcode-select 路径:"
-          xcode-select -p
+      #     echo "再次验证 xcode-select 路径:"
+      #     xcode-select -p
           
-          echo "尝试定位 iOS SDK 路径:"
-          xcrun --sdk iphoneos --show-sdk-path
-      # -----------------------------------------------------------
+      #     echo "尝试定位 iOS SDK 路径:"
+      #     xcrun --sdk iphoneos --show-sdk-path
+      # # -----------------------------------------------------------
       
-      - name: Free up disk space
-        run: |
-          # 清理不必要的文件以释放空间
-          echo "清理前磁盘空间："
-          df -h
+      # - name: Free up disk space
+      #   run: |
+      #     # 清理不必要的文件以释放空间
+      #     echo "清理前磁盘空间："
+      #     df -h
           
-          # 删除不需要的 Xcode 版本和工具
-          sudo rm -rf /Applications/Xcode_*.app 2>/dev/null || true
-          sudo rm -rf ~/Library/Developer/Xcode/DerivedData/* 2>/dev/null || true
+      #     # 删除不需要的 Xcode 版本和工具
+      #     sudo rm -rf /Applications/Xcode_*.app 2>/dev/null || true
+      #     sudo rm -rf ~/Library/Developer/Xcode/DerivedData/* 2>/dev/null || true
           
-          echo "清理后磁盘空间："
-          df -h
+      #     echo "清理后磁盘空间："
+      #     df -h
       
       - name: Clone VLCKit
         run: |
