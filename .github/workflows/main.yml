@@ -1,0 +1,582 @@
+name: Auto Build VLCKit Universal
+
+on:
+  # 每天 UTC 00:00 检查更新
+  schedule:
+    - cron: '0 0 * * *'
+  
+  # 支持手动触发（用于测试）
+  workflow_dispatch:
+
+env:
+  UPSTREAM_REPO: 'videolan/vlckit'
+  KEEP_RELEASES: 5  # 保留最近 N 个 Release
+
+jobs:
+  check-update:
+    name: Check for New Tags
+    runs-on: ubuntu-latest
+    outputs:
+      has_new_tag: ${{ steps.check.outputs.has_new_tag }}
+      new_tag: ${{ steps.check.outputs.new_tag }}
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      
+      - name: Check for new tags
+        id: check
+        run: |
+          # 获取上游最新 tag
+          LATEST_TAG=$(git ls-remote --tags --refs https://github.com/${{ env.UPSTREAM_REPO }}.git | 
+                       grep -v '\^{}' | 
+                       sort -t '/' -k 3 -V | 
+                       tail -n1 | 
+                       awk '{print $2}' | 
+                       sed 's|refs/tags/||')
+          
+          echo "上游最新 tag: $LATEST_TAG"
+          
+          # 检查本地是否已存在该 tag
+          if git rev-parse "$LATEST_TAG" >/dev/null 2>&1; then
+            echo "Tag $LATEST_TAG 已存在，无需构建"
+            echo "has_new_tag=false" >> $GITHUB_OUTPUT
+          else
+            echo "发现新 tag: $LATEST_TAG"
+            echo "has_new_tag=true" >> $GITHUB_OUTPUT
+            echo "new_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    name: Build Universal XCFramework
+    needs: check-update
+    if: needs.check-update.outputs.has_new_tag == 'true'
+    runs-on: macos-latest  # 使用 M1 runner（更快）
+    timeout-minutes: 540  # 9 小时超时（编译三个平台）
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      
+      - name: Show System Info
+        run: |
+          echo "=== System Info ==="
+          sw_vers
+          xcodebuild -version
+          df -h
+          sysctl -n hw.ncpu
+      
+      - name: Free up disk space
+        run: |
+          # 清理不必要的文件以释放空间
+          echo "清理前磁盘空间："
+          df -h
+          
+          # 删除不需要的 Xcode 版本和工具
+          sudo rm -rf /Applications/Xcode_*.app 2>/dev/null || true
+          sudo rm -rf ~/Library/Developer/Xcode/DerivedData/* 2>/dev/null || true
+          
+          echo "清理后磁盘空间："
+          df -h
+      
+      - name: Clone VLCKit
+        run: |
+          git clone --depth 1 --branch ${{ needs.check-update.outputs.new_tag }} \
+            https://github.com/${{ env.UPSTREAM_REPO }}.git vlckit
+          cd vlckit
+          echo "✅ 克隆完成，tag: ${{ needs.check-update.outputs.new_tag }}"
+      
+      - name: Install Dependencies
+        run: |
+          echo "安装编译依赖..."
+          brew install automake libtool pkg-config ragel yasm nasm
+          
+          # 检查 Python3
+          python3 --version
+          
+          echo "✅ 依赖安装完成"
+      
+      - name: Build iOS XCFramework
+        run: |
+          cd vlckit
+          
+          echo "🚀 [1/3] 开始编译 iOS（预计 2-3 小时）"
+          echo "包含: iPhone/iPad 真机 (arm64) + 模拟器 (arm64/x86_64)"
+          echo "开始时间: $(date)"
+          
+          ./compileAndBuildVLCKit.sh -f -r -a all
+          
+          echo "✅ iOS 编译完成"
+          echo "完成时间: $(date)"
+          ls -lh build/iOS/VLCKit.xcframework
+      
+      - name: Build tvOS XCFramework
+        run: |
+          cd vlckit
+          
+          echo "🚀 [2/3] 开始编译 tvOS（预计 2-3 小时）"
+          echo "包含: Apple TV 真机 (arm64) + 模拟器 (arm64/x86_64)"
+          echo "开始时间: $(date)"
+          
+          ./compileAndBuildVLCKit.sh -f -r -a all -t
+          
+          echo "✅ tvOS 编译完成"
+          echo "完成时间: $(date)"
+          ls -lh build/tvOS/VLCKit.xcframework
+      
+      - name: Build macOS XCFramework
+        run: |
+          cd vlckit
+          
+          echo "🚀 [3/3] 开始编译 macOS（预计 2-3 小时）"
+          echo "包含: Apple Silicon (arm64) + Intel (x86_64)"
+          echo "开始时间: $(date)"
+          
+          ./compileAndBuildVLCKit.sh -f -r -a all -x
+          
+          echo "✅ macOS 编译完成"
+          echo "完成时间: $(date)"
+          ls -lh build/macOS/VLCKit.xcframework
+      
+      - name: Merge into Universal XCFramework
+        run: |
+          cd vlckit/build
+          
+          echo "🔨 开始合并所有平台到一个 Universal XCFramework..."
+          
+          # 提取所有平台的 framework 路径
+          IOS_FRAMEWORKS=""
+          TVOS_FRAMEWORKS=""
+          MACOS_FRAMEWORKS=""
+          
+          # iOS
+          if [ -d "iOS/VLCKit.xcframework" ]; then
+            for platform_dir in iOS/VLCKit.xcframework/*; do
+              if [ -d "$platform_dir/VLCKit.framework" ]; then
+                IOS_FRAMEWORKS="$IOS_FRAMEWORKS -framework $platform_dir/VLCKit.framework"
+                echo "找到 iOS framework: $platform_dir"
+              fi
+            done
+          fi
+          
+          # tvOS
+          if [ -d "tvOS/VLCKit.xcframework" ]; then
+            for platform_dir in tvOS/VLCKit.xcframework/*; do
+              if [ -d "$platform_dir/VLCKit.framework" ]; then
+                TVOS_FRAMEWORKS="$TVOS_FRAMEWORKS -framework $platform_dir/VLCKit.framework"
+                echo "找到 tvOS framework: $platform_dir"
+              fi
+            done
+          fi
+          
+          # macOS
+          if [ -d "macOS/VLCKit.xcframework" ]; then
+            for platform_dir in macOS/VLCKit.xcframework/*; do
+              if [ -d "$platform_dir/VLCKit.framework" ]; then
+                MACOS_FRAMEWORKS="$MACOS_FRAMEWORKS -framework $platform_dir/VLCKit.framework"
+                echo "找到 macOS framework: $platform_dir"
+              fi
+            done
+          fi
+          
+          # 合并创建 Universal XCFramework
+          xcodebuild -create-xcframework \
+            $IOS_FRAMEWORKS \
+            $TVOS_FRAMEWORKS \
+            $MACOS_FRAMEWORKS \
+            -output VLCKit-Universal.xcframework
+          
+          echo "✅ Universal XCFramework 创建成功"
+          ls -lh VLCKit-Universal.xcframework
+          
+          # 显示包含的平台
+          echo ""
+          echo "📦 包含的平台："
+          ls -1 VLCKit-Universal.xcframework/
+      
+      - name: Compress with Maximum Level
+        run: |
+          cd vlckit/build
+          
+          echo "📦 开始压缩（最高级别 -9，这可能需要 30-60 分钟）..."
+          echo "开始时间: $(date)"
+          
+          # 使用最高压缩级别
+          zip -9 -r VLCKit.xcframework.zip VLCKit-Universal.xcframework
+          
+          echo "✅ 压缩完成"
+          echo "完成时间: $(date)"
+          
+          # 显示文件大小
+          echo ""
+          echo "📊 文件大小："
+          ls -lh VLCKit.xcframework.zip
+          du -sh VLCKit-Universal.xcframework
+      
+      - name: Calculate Checksum
+        id: checksum
+        run: |
+          cd vlckit/build
+          
+          # 计算 SHA256
+          CHECKSUM=$(shasum -a 256 VLCKit.xcframework.zip | awk '{print $1}')
+          echo "$CHECKSUM  VLCKit.xcframework.zip" > checksum.txt
+          
+          echo "✅ 校验和："
+          cat checksum.txt
+          
+          echo "checksum=$CHECKSUM" >> $GITHUB_OUTPUT
+      
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: VLCKit-${{ needs.check-update.outputs.new_tag }}
+          path: |
+            vlckit/build/VLCKit.xcframework.zip
+            vlckit/build/checksum.txt
+          retention-days: 1
+          compression-level: 0  # 已经压缩过了，不需要再压缩
+
+  release:
+    name: Create GitHub Release
+    needs: [check-update, build]
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Download Artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: VLCKit-${{ needs.check-update.outputs.new_tag }}
+          path: ./artifacts
+      
+      - name: Read Checksum
+        id: checksum
+        run: |
+          CHECKSUM=$(cat ./artifacts/checksum.txt | awk '{print $1}')
+          echo "checksum=$CHECKSUM" >> $GITHUB_OUTPUT
+          
+          echo "📋 SHA256 Checksum:"
+          cat ./artifacts/checksum.txt
+      
+      - name: Get File Size
+        id: filesize
+        run: |
+          SIZE=$(ls -lh ./artifacts/VLCKit.xcframework.zip | awk '{print $5}')
+          echo "size=$SIZE" >> $GITHUB_OUTPUT
+          echo "📦 文件大小: $SIZE"
+      
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.check-update.outputs.new_tag }}
+          name: VLCKit ${{ needs.check-update.outputs.new_tag }}
+          body: |
+            ## 🎉 VLCKit ${{ needs.check-update.outputs.new_tag }} - Universal XCFramework
+            
+            > 自动编译自 [videolan/vlckit@${{ needs.check-update.outputs.new_tag }}](https://github.com/${{ env.UPSTREAM_REPO }}/tree/${{ needs.check-update.outputs.new_tag }})
+            
+            ---
+            
+            ### 📦 包含平台
+            
+            此版本包含一个 **Universal XCFramework**，支持主流 Apple 平台：
+            
+            | 平台 | 架构 | 说明 |
+            |------|------|------|
+            | **iOS** | arm64 | iPhone/iPad 真机 |
+            | **iOS Simulator** | arm64, x86_64 | M1/M2 Mac & Intel Mac |
+            | **tvOS** | arm64 | Apple TV 真机 |
+            | **tvOS Simulator** | arm64, x86_64 | M1/M2 Mac & Intel Mac |
+            | **macOS** | arm64, x86_64 | Apple Silicon & Intel Mac |
+            
+            > 💡 **关于其他平台：**
+            > - **visionOS**: Vision Pro 可在兼容模式下运行 iOS 版本
+            > - **watchOS**: 手表不适合播放视频，已排除
+            
+            ### 📊 文件信息
+            
+            - **文件名**: `VLCKit.xcframework.zip`
+            - **大小**: `${{ steps.filesize.outputs.size }}`
+            - **压缩级别**: 最高（-9）
+            
+            ### 🔐 校验和
+            
+            ```
+            SHA256: ${{ steps.checksum.outputs.checksum }}
+            ```
+            
+            验证下载：
+            ```bash
+            shasum -a 256 VLCKit.xcframework.zip
+            ```
+            
+            ---
+            
+            ### 🚀 使用方法
+            
+            #### 方式 1: Swift Package Manager (推荐)
+            
+            在 `Package.swift` 中添加：
+            
+            ```swift
+            dependencies: [
+                .package(url: "https://github.com/${{ github.repository }}", from: "${{ needs.check-update.outputs.new_tag }}")
+            ]
+            ```
+            
+            或在 Xcode 中：
+            1. `File` → `Add Package Dependencies...`
+            2. 输入：`https://github.com/${{ github.repository }}`
+            3. 选择版本后点击 `Add Package`
+            
+            #### 方式 2: 手动集成
+            
+            ```bash
+            # 下载
+            wget https://github.com/${{ github.repository }}/releases/download/${{ needs.check-update.outputs.new_tag }}/VLCKit.xcframework.zip
+            
+            # 验证
+            echo "${{ steps.checksum.outputs.checksum }}  VLCKit.xcframework.zip" | shasum -a 256 -c
+            
+            # 解压
+            unzip VLCKit.xcframework.zip
+            
+            # 拖入 Xcode 项目
+            ```
+            
+            #### 方式 3: CocoaPods
+            
+            ```ruby
+            pod 'VLCKit', :http => 'https://github.com/${{ github.repository }}/releases/download/${{ needs.check-update.outputs.new_tag }}/VLCKit.xcframework.zip'
+            ```
+            
+            ---
+            
+            ### 💡 跨平台开发示例
+            
+            此 Universal XCFramework 完美支持跨平台开发：
+            
+            ```swift
+            import SwiftUI
+            import VLCKit
+            
+            struct VideoPlayer: View {
+                var body: some View {
+                    // 同一套代码，iOS/tvOS/macOS 通用
+                    VLCPlayerView()
+                        #if os(iOS)
+                        .navigationBarTitleDisplayMode(.inline)
+                        #endif
+                }
+            }
+            ```
+            
+            编译时 Xcode 会自动选择对应平台的代码，无需任何配置！
+            
+            ---
+            
+            ### 📝 更新日志
+            
+            查看上游更新：[VLCKit Releases](https://github.com/${{ env.UPSTREAM_REPO }}/releases)
+            
+            ---
+            
+            ### 🐛 问题反馈
+            
+            - VLCKit 相关问题：[videolan/vlckit Issues](https://github.com/${{ env.UPSTREAM_REPO }}/issues)
+            - 构建脚本问题：[本仓库 Issues](https://github.com/${{ github.repository }}/issues)
+            
+            ---
+            
+            ### 📜 许可证
+            
+            VLCKit 采用 **LGPL v2.1** 或更高版本
+            
+            ---
+            
+            🤖 **本版本由 GitHub Actions 全自动构建**  
+            💤 睡一觉，新版本就编译好了！
+          draft: false
+          prerelease: false
+          files: |
+            ./artifacts/VLCKit.xcframework.zip
+            ./artifacts/checksum.txt
+      
+      - name: Update Package.swift
+        run: |
+          TAG="${{ needs.check-update.outputs.new_tag }}"
+          CHECKSUM="${{ steps.checksum.outputs.checksum }}"
+          REPO="${{ github.repository }}"
+          
+          cat > Package.swift << 'EOF'
+          // swift-tools-version:5.9
+          import PackageDescription
+          
+          let package = Package(
+              name: "VLCKit",
+              platforms: [
+                  .iOS(.v12),
+                  .tvOS(.v12),
+                  .macOS(.v10_13)
+              ],
+              products: [
+                  .library(
+                      name: "VLCKit",
+                      targets: ["VLCKit"]
+                  )
+              ],
+              targets: [
+                  .binaryTarget(
+                      name: "VLCKit",
+                      url: "https://github.com/REPO_PLACEHOLDER/releases/download/TAG_PLACEHOLDER/VLCKit.xcframework.zip",
+                      checksum: "CHECKSUM_PLACEHOLDER"
+                  )
+              ]
+          )
+          EOF
+          
+          # 替换占位符
+          sed -i "s|REPO_PLACEHOLDER|${REPO}|g" Package.swift
+          sed -i "s|TAG_PLACEHOLDER|${TAG}|g" Package.swift
+          sed -i "s|CHECKSUM_PLACEHOLDER|${CHECKSUM}|g" Package.swift
+          
+          echo "✅ Package.swift 已更新"
+          cat Package.swift
+      
+      - name: Commit and Push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add Package.swift
+          git commit -m "🤖 Update to VLCKit ${{ needs.check-update.outputs.new_tag }}"
+          git push
+      
+      - name: Cleanup Old Releases
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const repo = context.repo;
+            const keepCount = ${{ env.KEEP_RELEASES }};
+            
+            console.log(`📋 清理策略: 保留最近 ${keepCount} 个版本`);
+            
+            // 获取所有 releases
+            const { data: releases } = await github.rest.repos.listReleases({
+              owner: repo.owner,
+              repo: repo.repo,
+              per_page: 100
+            });
+            
+            console.log(`📊 当前共有 ${releases.length} 个 releases`);
+            
+            // 按创建时间排序（最新的在前）
+            const sortedReleases = releases.sort((a, b) => 
+              new Date(b.created_at) - new Date(a.created_at)
+            );
+            
+            // 删除旧版本
+            if (sortedReleases.length > keepCount) {
+              const toDelete = sortedReleases.slice(keepCount);
+              
+              console.log(`🗑️  将删除 ${toDelete.length} 个旧版本`);
+              
+              for (const release of toDelete) {
+                console.log(`   - 删除: ${release.tag_name} (${release.created_at})`);
+                
+                // 删除 release
+                await github.rest.repos.deleteRelease({
+                  owner: repo.owner,
+                  repo: repo.repo,
+                  release_id: release.id
+                });
+                
+                // 删除对应的 tag
+                try {
+                  await github.rest.git.deleteRef({
+                    owner: repo.owner,
+                    repo: repo.repo,
+                    ref: `tags/${release.tag_name}`
+                  });
+                } catch (error) {
+                  console.log(`   ⚠️  Tag ${release.tag_name} 删除失败或已删除`);
+                }
+              }
+              
+              console.log(`✅ 清理完成！保留了最近 ${keepCount} 个版本`);
+            } else {
+              console.log(`✅ 当前版本数 (${sortedReleases.length}) ≤ 保留数 (${keepCount})，无需清理`);
+            }
+
+  notify:
+    name: Notify on Failure
+    needs: [check-update, build, release]
+    if: failure()
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Create Issue on Failure
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = '${{ needs.check-update.outputs.new_tag }}';
+            const runUrl = `https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
+            
+            // 检查是否已存在相同的 issue
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'build-failure',
+              per_page: 100
+            });
+            
+            const existingIssue = issues.find(issue => 
+              issue.title.includes(tag)
+            );
+            
+            if (existingIssue) {
+              // 更新现有 issue
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existingIssue.number,
+                body: `## 🔄 再次构建失败\n\n- **运行时间**: ${new Date().toISOString()}\n- **运行日志**: ${runUrl}\n\n请检查日志以了解详情。`
+              });
+            } else {
+              // 创建新 issue
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `❌ VLCKit ${tag} 构建失败`,
+                body: `## 构建失败
+                
+                - **Tag**: ${tag}
+                - **运行日志**: ${runUrl}
+                - **时间**: ${new Date().toISOString()}
+                
+                ### 可能的原因
+                
+                1. 编译超时（> 10 小时）
+                2. 磁盘空间不足
+                3. 上游代码变更导致编译失败
+                4. GitHub Actions 环境问题
+                
+                请检查构建日志以了解详情。`,
+                labels: ['build-failure', 'automated']
+              });
+            }
