@@ -72,36 +72,57 @@ jobs:
           xcodebuild -version
           df -h
           sysctl -n hw.ncpu
-      # # 这个步骤必须放在这个 macos-latest 的 job 中
-      # - name: Select Xcode and Verify SDK Path
-      #   run: |
-      #     echo "当前 xcode-select 路径:"
-      #     xcode-select -p
+
+      - name: Free up disk space and Verify Version
+        run: |
+          echo "--- 清理前 ---"
+          echo "📊 磁盘空间使用情况:"
+          df -h
+          echo ""
+          echo "🍏 已安装的 Xcode 版本:"
+          ls -ld /Applications/Xcode_*.app
           
-      #     XCODE_PATH=$(xcode-select -p)
+          echo -e "\n--- 开始清理 ---"
+
+          # 1. 识别要保留的 Xcode 版本
+          # xcode-select -p 返回路径如 /Applications/Xcode_15.4.app/Contents/Developer
+          # 我们用 sed 提取出 App 的路径
+          SELECTED_XCODE_PATH=$(xcode-select -p | sed 's|/Contents/Developer||')
+          if [[ -z "$SELECTED_XCODE_PATH" || ! -d "$SELECTED_XCODE_PATH" ]]; then
+            echo "❌ 无法确定当前使用的 Xcode 路径，中止清理以策安全。"
+            exit 1
+          fi
+          echo "✅ 当前使用的 Xcode App: $(basename $SELECTED_XCODE_PATH)"
+          echo "ℹ️ 将保留此版本，并删除所有其他 Xcode 版本。"
           
-      #     sudo xcode-select -s "$XCODE_PATH"
-      #     echo "已使用 sudo 重新设置 xcode-select 路径为: $XCODE_PATH"
+          # 2. 精确删除其他 Xcode 版本
+          find /Applications -name "Xcode_*.app" -maxdepth 1 -not -path "$SELECTED_XCODE_PATH" -exec sudo rm -rf {} +
           
-      #     echo "再次验证 xcode-select 路径:"
-      #     xcode-select -p
+          # 3. 清理 Xcode 编译缓存
+          sudo rm -rf ~/Library/Developer/Xcode/DerivedData/* 2>/dev/null || true
           
-      #     echo "尝试定位 iOS SDK 路径:"
-      #     xcrun --sdk iphoneos --show-sdk-path
-      # # -----------------------------------------------------------
-      
-      # - name: Free up disk space
-      #   run: |
-      #     # 清理不必要的文件以释放空间
-      #     echo "清理前磁盘空间："
-      #     df -h
-          
-      #     # 删除不需要的 Xcode 版本和工具
-      #     sudo rm -rf /Applications/Xcode_*.app 2>/dev/null || true
-      #     sudo rm -rf ~/Library/Developer/Xcode/DerivedData/* 2>/dev/null || true
-          
-      #     echo "清理后磁盘空间："
-      #     df -h
+          echo "✅ 清理完成。"
+
+          echo -e "\n--- 清理后 ---"
+          echo "📊 磁盘空间使用情况:"
+          df -h
+          echo ""
+          echo "🍏 检查唯一保留的 Xcode App:"
+          ls -ld /Applications/Xcode_*.app
+          echo ""
+
+          # 最终验证：明确显示保留的 Xcode 版本信息
+          echo "✅ 最终验证：确认保留的 Xcode 版本..."
+          if [[ -d "$SELECTED_XCODE_PATH" ]]; then
+            echo "----------------------------------------"
+            # 调用 xcodebuild 命令，权威地显示版本号和 Build 号
+            xcodebuild -version
+            echo "----------------------------------------"
+            echo "✅ 验证成功！上述版本已被正确保留。"
+          else
+            echo "❌ 严重错误：当前使用的 Xcode 被意外删除！"
+            exit 1
+          fi
       
       - name: Clone VLCKit
         run: |
