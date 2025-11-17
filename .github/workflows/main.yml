@@ -1,16 +1,13 @@
 name: Auto Build VLCKit Universal
 
 on:
-  # 每天 UTC 00:00 检查更新
   schedule:
     - cron: '0 0 * * *'
-  
-  # 支持手动触发（用于测试）
   workflow_dispatch:
 
 env:
   UPSTREAM_REPO: 'videolan/vlckit'
-  KEEP_RELEASES: 5  # 保留最近 N 个 Release
+  KEEP_RELEASES: 5
 
 jobs:
   check-update:
@@ -29,7 +26,6 @@ jobs:
       - name: Check for new tags
         id: check
         run: |
-          # 获取上游最新 tag
           LATEST_TAG=$(git ls-remote --tags --refs https://github.com/${{ env.UPSTREAM_REPO }}.git | 
                        grep -v '\^{}' | 
                        sort -t '/' -k 3 -V | 
@@ -39,7 +35,6 @@ jobs:
           
           echo "上游最新 tag: $LATEST_TAG"
           
-          # 检查本地是否已存在该 tag
           if git rev-parse "$LATEST_TAG" >/dev/null 2>&1; then
             echo "Tag $LATEST_TAG 已存在，无需构建"
             echo "has_new_tag=false" >> $GITHUB_OUTPUT
@@ -53,8 +48,8 @@ jobs:
     name: Build Universal XCFramework
     needs: check-update
     if: needs.check-update.outputs.has_new_tag == 'true'
-    runs-on: macos-latest  # 使用 M1 runner（更快）
-    timeout-minutes: 540  # 9 小时超时（编译三个平台）
+    runs-on: macos-latest
+    timeout-minutes: 540
     
     steps:
       - name: Checkout
@@ -72,6 +67,9 @@ jobs:
           xcodebuild -version
           df -h
           sysctl -n hw.ncpu
+          echo ""
+          echo "=== 可用磁盘空间 ==="
+          df -h / | tail -n 1 | awk '{print "总容量: "$2", 已用: "$3", 可用: "$4", 使用率: "$5}'
 
       - name: Free up disk space and Verify Version
         run: |
@@ -80,11 +78,10 @@ jobs:
           df -h
           echo ""
           echo "🍏 已安装的 Xcode 版本:"
-          ls -ld /Applications/Xcode_*.app
+          ls -ld /Applications/Xcode_*.app 2>/dev/null || echo "没有找到 Xcode_*.app"
           
-          echo -e "\n--- 开始清理 (使用简单循环方法) ---"
+          echo -e "\n--- 开始清理 ---"
 
-          # 1. 明确检测出当前选中的 Xcode 路径
           SELECTED_XCODE_PATH=$(xcode-select -p | sed 's|/Contents/Developer||')
           if [[ -z "$SELECTED_XCODE_PATH" || ! -d "$SELECTED_XCODE_PATH" ]]; then
             echo "❌ 无法确定当前使用的 Xcode 路径，中止清理以策安全。"
@@ -92,33 +89,35 @@ jobs:
           fi
           echo "✅ 必须保留的 Xcode App 路径: ${SELECTED_XCODE_PATH}"
           
-          # 2. 遍历所有 Xcode，不是选中的路径就删除
           for XCODE_APP_PATH in /Applications/Xcode_*.app; do
-            # 检查这是否是一个实际存在的目录
             if [ -d "$XCODE_APP_PATH" ]; then
               if [ "$XCODE_APP_PATH" == "$SELECTED_XCODE_PATH" ]; then
-                echo " L 保留: $(basename $XCODE_APP_PATH)"
+                echo " ✓ 保留: $(basename $XCODE_APP_PATH)"
               else
-                echo " X 删除: $(basename $XCODE_APP_PATH)"
+                echo " ✗ 删除: $(basename $XCODE_APP_PATH)"
                 sudo rm -rf "$XCODE_APP_PATH"
               fi
             fi
           done
           
-          # 3. 清理 Xcode 编译缓存
+          # 清理更多空间
+          echo "清理 Xcode 缓存..."
           sudo rm -rf ~/Library/Developer/Xcode/DerivedData/* 2>/dev/null || true
+          sudo rm -rf ~/Library/Developer/Xcode/Archives/* 2>/dev/null || true
+          sudo rm -rf ~/Library/Caches/com.apple.dt.Xcode/* 2>/dev/null || true
+          
+          # 清理 Homebrew 缓存
+          echo "清理 Homebrew 缓存..."
+          brew cleanup -s 2>/dev/null || true
+          rm -rf $(brew --cache) 2>/dev/null || true
           
           echo "✅ 清理完成。"
-
           echo -e "\n--- 清理后 ---"
           echo "📊 磁盘空间使用情况:"
           df -h
           echo ""
-          echo "🍏 检查唯一保留的 Xcode App:"
-          ls -ld /Applications/Xcode_*.app
-          echo ""
+          df -h / | tail -n 1 | awk '{print "可用空间: "$4}'
 
-          # 最终验证：明确显示保留的 Xcode 版本信息
           echo "✅ 最终验证：确认保留的 Xcode 版本..."
           if [[ -d "$SELECTED_XCODE_PATH" ]]; then
             echo "----------------------------------------"
@@ -141,23 +140,16 @@ jobs:
         run: |
           echo "--- 准备安装所有编译依赖 ---"
           
-          # 1. 安装所有缺失的工具 (基于日志的完整列表)
-          # -----------------------------------------------------------------
-          # autoconf, automake, libtool, pkg-config, cmake, gettext, bison, yasm, nasm, ragel (来自之前版本)
-          # ant, xz, meson, ninja, help2man (新增的、之前遗漏的包)
-          # -----------------------------------------------------------------
           echo "STEP 1: 开始安装完整的工具包..."
           brew install autoconf automake libtool pkg-config cmake ant xz gettext bison yasm nasm ragel meson ninja help2man
           
           echo "---"
-          echo "STEP 2: 处理特殊包的链接问题 (解决 incompatible version)..."
-          # macOS 自带了旧版的 bison 和 gettext，强制让新版生效
+          echo "STEP 2: 处理特殊包的链接问题..."
           brew link --force bison
           brew link --force gettext
           
           echo "---"
-          echo "STEP 3: 修正 PATH 搜索路径 (解决 not found)..."
-          # 将 Homebrew 路径添加到后续所有步骤的 PATH 环境变量的最前面
+          echo "STEP 3: 修正 PATH 搜索路径..."
           echo "/opt/homebrew/bin" >> $GITHUB_PATH
           
           echo ""
@@ -179,12 +171,25 @@ jobs:
           echo "🚀 [1/3] 开始编译 iOS（预计 2-3 小时）"
           echo "包含: iPhone/iPad 真机 (arm64) + 模拟器 (arm64/x86_64)"
           echo "开始时间: $(date)"
+          echo ""
+          echo "⚠️  启用详细日志输出以便调试..."
+          echo ""
           
-          ./compileAndBuildVLCKit.sh -f -r -a all
+          # 🔧 关键修复：添加 -v 参数启用详细日志
+          set -e  # 遇到错误立即退出
+          ./compileAndBuildVLCKit.sh -f -r -a all -v
           
+          echo ""
           echo "✅ iOS 编译完成"
           echo "完成时间: $(date)"
-          ls -lh build/iOS/VLCKit.xcframework
+          
+          # 验证输出文件
+          if [ -d "build/iOS/VLCKit.xcframework" ]; then
+            ls -lh build/iOS/VLCKit.xcframework
+          else
+            echo "❌ 错误：iOS XCFramework 未生成！"
+            exit 1
+          fi
       
       - name: Build tvOS XCFramework
         run: |
@@ -194,11 +199,19 @@ jobs:
           echo "包含: Apple TV 真机 (arm64) + 模拟器 (arm64/x86_64)"
           echo "开始时间: $(date)"
           
-          ./compileAndBuildVLCKit.sh -f -r -a all -t
+          # 🔧 添加 -v 参数
+          set -e
+          ./compileAndBuildVLCKit.sh -f -r -a all -t -v
           
           echo "✅ tvOS 编译完成"
           echo "完成时间: $(date)"
-          ls -lh build/tvOS/VLCKit.xcframework
+          
+          if [ -d "build/tvOS/VLCKit.xcframework" ]; then
+            ls -lh build/tvOS/VLCKit.xcframework
+          else
+            echo "❌ 错误：tvOS XCFramework 未生成！"
+            exit 1
+          fi
       
       - name: Build macOS XCFramework
         run: |
@@ -208,11 +221,25 @@ jobs:
           echo "包含: Apple Silicon (arm64) + Intel (x86_64)"
           echo "开始时间: $(date)"
           
-          ./compileAndBuildVLCKit.sh -f -r -a all -x
+          # 🔧 添加 -v 参数
+          set -e
+          ./compileAndBuildVLCKit.sh -f -r -a all -x -v
           
           echo "✅ macOS 编译完成"
           echo "完成时间: $(date)"
-          ls -lh build/macOS/VLCKit.xcframework
+          
+          if [ -d "build/macOS/VLCKit.xcframework" ]; then
+            ls -lh build/macOS/VLCKit.xcframework
+          else
+            echo "❌ 错误：macOS XCFramework 未生成！"
+            exit 1
+          fi
+      
+      - name: Check Disk Space Before Merge
+        run: |
+          echo "📊 合并前磁盘空间："
+          df -h
+          df -h / | tail -n 1 | awk '{print "可用空间: "$4}'
       
       - name: Merge into Universal XCFramework
         run: |
@@ -220,7 +247,6 @@ jobs:
           
           echo "🔨 开始合并所有平台到一个 Universal XCFramework..."
           
-          # 提取所有平台的 framework 路径
           IOS_FRAMEWORKS=""
           TVOS_FRAMEWORKS=""
           MACOS_FRAMEWORKS=""
@@ -255,6 +281,15 @@ jobs:
             done
           fi
           
+          # 验证是否找到了所有 frameworks
+          if [ -z "$IOS_FRAMEWORKS" ] || [ -z "$TVOS_FRAMEWORKS" ] || [ -z "$MACOS_FRAMEWORKS" ]; then
+            echo "❌ 错误：缺少某些平台的 framework"
+            echo "iOS: $IOS_FRAMEWORKS"
+            echo "tvOS: $TVOS_FRAMEWORKS"
+            echo "macOS: $MACOS_FRAMEWORKS"
+            exit 1
+          fi
+          
           # 合并创建 Universal XCFramework
           xcodebuild -create-xcframework \
             $IOS_FRAMEWORKS \
@@ -265,7 +300,6 @@ jobs:
           echo "✅ Universal XCFramework 创建成功"
           ls -lh VLCKit-Universal.xcframework
           
-          # 显示包含的平台
           echo ""
           echo "📦 包含的平台："
           ls -1 VLCKit-Universal.xcframework/
@@ -277,13 +311,11 @@ jobs:
           echo "📦 开始压缩（最高级别 -9，这可能需要 30-60 分钟）..."
           echo "开始时间: $(date)"
           
-          # 使用最高压缩级别
           zip -9 -r VLCKit.xcframework.zip VLCKit-Universal.xcframework
           
           echo "✅ 压缩完成"
           echo "完成时间: $(date)"
           
-          # 显示文件大小
           echo ""
           echo "📊 文件大小："
           ls -lh VLCKit.xcframework.zip
@@ -294,7 +326,6 @@ jobs:
         run: |
           cd vlckit/build
           
-          # 计算 SHA256
           CHECKSUM=$(shasum -a 256 VLCKit.xcframework.zip | awk '{print $1}')
           echo "$CHECKSUM  VLCKit.xcframework.zip" > checksum.txt
           
@@ -311,7 +342,7 @@ jobs:
             vlckit/build/VLCKit.xcframework.zip
             vlckit/build/checksum.txt
           retention-days: 1
-          compression-level: 0  # 已经压缩过了，不需要再压缩
+          compression-level: 0
 
   release:
     name: Create GitHub Release
@@ -518,7 +549,6 @@ jobs:
           )
           EOF
           
-          # 替换占位符
           sed -i "s|REPO_PLACEHOLDER|${REPO}|g" Package.swift
           sed -i "s|TAG_PLACEHOLDER|${TAG}|g" Package.swift
           sed -i "s|CHECKSUM_PLACEHOLDER|${CHECKSUM}|g" Package.swift
@@ -544,7 +574,6 @@ jobs:
             
             console.log(`📋 清理策略: 保留最近 ${keepCount} 个版本`);
             
-            // 获取所有 releases
             const { data: releases } = await github.rest.repos.listReleases({
               owner: repo.owner,
               repo: repo.repo,
@@ -553,12 +582,10 @@ jobs:
             
             console.log(`📊 当前共有 ${releases.length} 个 releases`);
             
-            // 按创建时间排序（最新的在前）
             const sortedReleases = releases.sort((a, b) => 
               new Date(b.created_at) - new Date(a.created_at)
             );
             
-            // 删除旧版本
             if (sortedReleases.length > keepCount) {
               const toDelete = sortedReleases.slice(keepCount);
               
@@ -567,14 +594,12 @@ jobs:
               for (const release of toDelete) {
                 console.log(`   - 删除: ${release.tag_name} (${release.created_at})`);
                 
-                // 删除 release
                 await github.rest.repos.deleteRelease({
                   owner: repo.owner,
                   repo: repo.repo,
                   release_id: release.id
                 });
                 
-                // 删除对应的 tag
                 try {
                   await github.rest.git.deleteRef({
                     owner: repo.owner,
@@ -605,7 +630,6 @@ jobs:
             const tag = '${{ needs.check-update.outputs.new_tag }}';
             const runUrl = `https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
             
-            // 检查是否已存在相同的 issue
             const { data: issues } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -619,7 +643,6 @@ jobs:
             );
             
             if (existingIssue) {
-              // 更新现有 issue
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -627,7 +650,6 @@ jobs:
                 body: `## 🔄 再次构建失败\n\n- **运行时间**: ${new Date().toISOString()}\n- **运行日志**: ${runUrl}\n\n请检查日志以了解详情。`
               });
             } else {
-              // 创建新 issue
               await github.rest.issues.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -640,12 +662,13 @@ jobs:
                 
                 ### 可能的原因
                 
-                1. 编译超时（> 10 小时）
+                1. 编译超时（> 9 小时）
                 2. 磁盘空间不足
                 3. 上游代码变更导致编译失败
-                4. GitHub Actions 环境问题
+                4. Xcode 版本兼容性问题
+                5. 依赖包版本冲突
                 
-                请检查构建日志以了解详情。`,
+                请检查构建日志以了解详情。详细的编译输出现已启用。`,
                 labels: ['build-failure', 'automated']
               });
             }
